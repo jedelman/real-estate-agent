@@ -18,6 +18,35 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 
+# ------------------------------------------------------------------ App config
+
+@dataclass
+class AppConfig:
+    """One-time setup configuration."""
+    agent_name: str = "Cassie"
+    customer_name: str = "Sarah"
+    setup_complete: bool = False
+
+
+class ConfigStore:
+    """Persists agent/customer identity config."""
+
+    def __init__(self):
+        self._path = DATA_DIR / "config.json"
+
+    def load(self) -> AppConfig:
+        if self._path.exists():
+            data = json.loads(self._path.read_text())
+            return AppConfig(**data)
+        return AppConfig()
+
+    def save(self, cfg: AppConfig) -> None:
+        self._path.write_text(json.dumps(asdict(cfg), indent=2))
+
+    def is_configured(self) -> bool:
+        return self.load().setup_complete
+
+
 @dataclass
 class Preferences:
     """Buyer's preference profile."""
