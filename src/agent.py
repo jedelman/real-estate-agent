@@ -20,8 +20,8 @@ from typing import Any
 
 import anthropic
 
-from .database import Conversation, Preferences, Property, SavedProperty, Session, get_session
-from .properties import SearchCriteria, property_to_dict, search_properties, seed_sample_data
+from .properties import SearchCriteria, load_properties, property_to_dict, search_properties
+from .storage import Preferences, PreferencesStore, SavedProperty
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -182,13 +182,7 @@ TOOLS: list[dict] = [
 # Tool implementation
 # ---------------------------------------------------------------------------
 
-def _get_or_create_preferences(session: Session, customer_name: str) -> Preferences:
-    prefs = session.query(Preferences).first()
-    if not prefs:
-        prefs = Preferences(customer_name=customer_name)
-        session.add(prefs)
-        session.commit()
-    return prefs
+_store = PreferencesStore(backend="json")
 
 
 def _preferences_to_dict(prefs: Preferences) -> dict:
@@ -219,11 +213,129 @@ def _preferences_to_dict(prefs: Preferences) -> dict:
         "max_commute_minutes": prefs.max_commute_minutes,
         "commute_destination": prefs.commute_destination,
         "raw_notes": prefs.raw_notes,
-        "updated_at": prefs.updated_at.isoformat() if prefs.updated_at else None,
+        "updated_at": prefs.updated_at,
     }
 
 
-def _score_property(prop: Property, prefs: Preferences) -> tuple[int, list[str]]:
+def _score_property_dict(prop: dict, prefs: Preferences) -> tuple[int, list[str]]:
+    """Score a property dict against preferences."""
+    score = 50
+    reasons = []
+
+    # Budget
+    if prefs.budget_max and prop.get("price", 0) > prefs.budget_max:
+        score -= 30
+    elif prefs.budget_max and prop.get("price", 0) <= prefs.budget_max * 0.9:
+        score += 10
+        reasons.append(f"well within budget at ${prop.get('price', 0):,.0f}")
+
+    # Bedrooms
+    if prefs.bedrooms_min and prop.get("bedrooms", 0) >= prefs.bedrooms_min:
+        score += 8
+        reasons.append(f"{prop.get('bedrooms')} beds meets your minimum")
+    elif prefs.bedrooms_min and prop.get("bedrooms", 0) < prefs.bedrooms_min:
+        score -= 15
+
+    # Style
+    features_lower = [f.lower() for f in (prop.get("features") or [])]
+    desc_lower = (prop.get("description") or "").lower()
+    style_lower = (prop.get("style") or "").lower()
+
+    if prefs.preferred_styles:
+        for s in prefs.preferred_styles:
+            if s.lower() in style_lower:
+                score += 12
+                reasons.append(f"matches your love of {s} style")
+                break
+
+    # Must-haves
+    if prefs.needs_home_office:
+        if "home office" in features_lower or "office" in desc_lower:
+            score += 12
+            reasons.append("has a dedicated home office")
+        else:
+            score -= 10
+
+    if prefs.needs_pool:
+        if "pool" in features_lower:
+            score += 12
+            reasons.append("has a pool")
+        else:
+            score -= 8
+
+    if prefs.needs_good_schools:
+        if "good schools" in features_lower or "isd" in desc_lower or "elementary" in desc_lower:
+            score += 12
+            reasons.append("located in a top-rated school district")
+        else:
+            score -= 5
+
+    if prefs.needs_single_story:
+        if prop.get("stories") == 1:
+            score += 10
+            reasons.append("single story layout")
+        else:
+            score -= 12
+
+    if prefs.needs_open_floor_plan:
+        if "open floor plan" in features_lower or "open plan" in desc_lower:
+            score += 8
+            reasons.append("open floor plan")
+
+    if prefs.needs_walkability:
+        if "walkable" in features_lower or "walk" in desc_lower:
+            score += 8
+            reasons.append("highly walkable neighborhood")
+
+    if prefs.needs_large_yard:
+        lot_sqft = prop.get("lot_sqft")
+        if lot_sqft and lot_sqft >= 8000:
+            score += 8
+            reasons.append(f"large {lot_sqft:,} sq ft lot")
+        else:
+            score -= 5
+
+    if prefs.needs_new_construction:
+        year_built = prop.get("year_built")
+        if year_built and year_built >= 2020:
+            score += 10
+            reasons.append(f"new construction ({year_built})")
+        else:
+            score -= 5
+
+    # Deal breakers
+    for db in (prefs.deal_breakers or []):
+        db_lower = db.lower()
+        if db_lower == "hoa" and prop.get("hoa_monthly", 0) and prop.get("hoa_monthly", 0) > 0:
+            score -= 25
+        elif db_lower in features_lower or db_lower in desc_lower:
+            score -= 20
+
+    # Sqft
+    sqft = prop.get("sqft", 0)
+    if prefs.sqft_min and sqft < prefs.sqft_min:
+        score -= 12
+    elif prefs.sqft_min and sqft >= prefs.sqft_min * 1.1:
+        score += 5
+        reasons.append(f"generously sized at {sqft:,} sqft")
+
+    # Neighborhoods
+    if prefs.target_neighborhoods:
+        for n in prefs.target_neighborhoods:
+            if n.lower() in (prop.get("neighborhood") or "").lower():
+                score += 15
+                reasons.append(f"in your preferred neighborhood ({prop.get('neighborhood')})")
+                break
+
+    # Cities
+    if prefs.target_cities:
+        if prop.get("city") in prefs.target_cities:
+            score += 5
+
+    return max(0, min(100, score)), reasons
+
+
+def _score_property(prop, prefs: Preferences) -> tuple[int, list[str]]:
     """Return (score 0-100, list of match reasons)."""
     score = 50
     reasons = []
@@ -338,37 +450,15 @@ def _score_property(prop: Property, prefs: Preferences) -> tuple[int, list[str]]
     return max(0, min(100, score)), reasons
 
 
-def _execute_tool(tool_name: str, tool_input: dict, session: Session, customer_name: str) -> Any:
+def _execute_tool(tool_name: str, tool_input: dict, customer_name: str, all_properties: list) -> Any:
     """Execute a tool call and return a JSON-serializable result."""
 
     if tool_name == "get_preferences":
-        prefs = _get_or_create_preferences(session, customer_name)
+        prefs = _store.get_preferences(customer_name)
         return _preferences_to_dict(prefs)
 
     elif tool_name == "update_preferences":
-        prefs = _get_or_create_preferences(session, customer_name)
-        list_fields = {"target_cities", "target_neighborhoods", "target_zip_codes",
-                       "preferred_styles", "preferred_vibes", "deal_breakers"}
-        for key, value in tool_input.items():
-            if not hasattr(prefs, key):
-                continue
-            if key == "raw_notes" and value:
-                existing = prefs.raw_notes or ""
-                timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-                prefs.raw_notes = f"{existing}\n[{timestamp}] {value}".strip()
-            elif key == "extra_preferences" and isinstance(value, dict):
-                existing = prefs.extra_preferences or {}
-                existing.update(value)
-                prefs.extra_preferences = existing
-            elif key in list_fields and isinstance(value, list):
-                # Merge lists (dedupe)
-                existing_list = getattr(prefs, key) or []
-                merged = list(dict.fromkeys(existing_list + value))
-                setattr(prefs, key, merged)
-            else:
-                setattr(prefs, key, value)
-        prefs.updated_at = datetime.utcnow()
-        session.commit()
+        prefs = _store.update_preferences(customer_name, tool_input)
         return {"status": "ok", "updated_fields": list(tool_input.keys())}
 
     elif tool_name == "search_properties":
@@ -384,78 +474,65 @@ def _execute_tool(tool_name: str, tool_input: dict, session: Session, customer_n
             keywords=tool_input.get("keywords", []),
             limit=tool_input.get("limit", 5),
         )
-        results = search_properties(session, criteria)
+        results = search_properties(all_properties, criteria)
         return [property_to_dict(p) for p in results]
 
     elif tool_name == "get_property_details":
-        seed_sample_data(session)
-        prop = session.query(Property).filter_by(
-            external_id=tool_input["external_id"]
-        ).first()
-        if not prop:
-            return {"error": f"Property {tool_input['external_id']} not found"}
-        return property_to_dict(prop)
+        ext_id = tool_input["external_id"]
+        for prop in all_properties:
+            if prop["external_id"] == ext_id:
+                return prop
+        return {"error": f"Property {ext_id} not found"}
 
     elif tool_name == "save_property":
-        seed_sample_data(session)
-        prop = session.query(Property).filter_by(
-            external_id=tool_input["external_id"]
-        ).first()
-        if not prop:
-            return {"error": f"Property {tool_input['external_id']} not found"}
+        ext_id = tool_input["external_id"]
+        prop_found = any(p["external_id"] == ext_id for p in all_properties)
+        if not prop_found:
+            return {"error": f"Property {ext_id} not found"}
 
-        saved = session.query(SavedProperty).filter_by(
-            external_id=tool_input["external_id"]
-        ).first()
-        if not saved:
-            saved = SavedProperty(
-                property_id=prop.id,
-                external_id=tool_input["external_id"],
-            )
-            session.add(saved)
-
-        saved.status = tool_input.get("status", "liked")
-        saved.notes = tool_input.get("notes", "")
-        saved.agent_rationale = tool_input.get("agent_rationale", "")
-        session.commit()
-        return {"status": "saved", "external_id": tool_input["external_id"]}
+        saved = SavedProperty(
+            external_id=ext_id,
+            status=tool_input.get("status", "liked"),
+            notes=tool_input.get("notes", ""),
+            agent_rationale=tool_input.get("agent_rationale", ""),
+        )
+        _store.save_property(saved)
+        return {"status": "saved", "external_id": ext_id}
 
     elif tool_name == "get_saved_properties":
-        saved = session.query(SavedProperty).all()
+        saved = _store.get_saved_properties()
+        # Enrich with property data
         result = []
         for s in saved:
-            prop = session.query(Property).filter_by(id=s.property_id).first()
-            if prop:
-                d = property_to_dict(prop)
-                d["saved_status"] = s.status
-                d["saved_notes"] = s.notes
-                d["agent_rationale"] = s.agent_rationale
-                result.append(d)
+            for prop in all_properties:
+                if prop["external_id"] == s.external_id:
+                    d = prop.copy()
+                    d["saved_status"] = s.status
+                    d["saved_notes"] = s.notes
+                    d["agent_rationale"] = s.agent_rationale
+                    result.append(d)
+                    break
         return result
 
     elif tool_name == "proactive_recommendations":
-        seed_sample_data(session)
         top_n = tool_input.get("top_n", 3)
-        prefs = _get_or_create_preferences(session, customer_name)
-        all_props = session.query(Property).filter_by(status="active").all()
+        prefs = _store.get_preferences(customer_name)
+        saved = _store.get_saved_properties()
 
         # Get already disliked to exclude
-        disliked_ids = {
-            s.external_id
-            for s in session.query(SavedProperty).filter_by(status="disliked").all()
-        }
+        disliked_ids = {s.external_id for s in saved if s.status == "disliked"}
 
         scored = []
-        for prop in all_props:
-            if prop.external_id in disliked_ids:
+        for prop in all_properties:
+            if prop["external_id"] in disliked_ids:
                 continue
-            score, reasons = _score_property(prop, prefs)
+            score, reasons = _score_property_dict(prop, prefs)
             scored.append((score, reasons, prop))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         recommendations = []
         for score, reasons, prop in scored[:top_n]:
-            d = property_to_dict(prop)
+            d = prop.copy()
             d["match_score"] = score
             d["match_reasons"] = reasons
             recommendations.append(d)
@@ -497,73 +574,71 @@ If this looks like a first conversation (no preferences set yet), warmly introdu
 # Main chat function
 # ---------------------------------------------------------------------------
 
-def chat(user_message: str, customer_name: str | None = None) -> str:
-    """Process a user message and return the agent's response."""
+def chat(user_message: str, messages_history: list | None = None, customer_name: str | None = None) -> str:
+    """Process a user message and return the agent's response.
+
+    Args:
+        user_message: The user's input
+        messages_history: Prior conversation history (for stateless calls)
+        customer_name: The customer's name
+
+    Returns:
+        The agent's response text
+    """
     customer_name = customer_name or os.getenv("CUSTOMER_NAME", "Sarah")
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    with get_session() as session:
-        # Load conversation history
-        history = session.query(Conversation).order_by(Conversation.timestamp).all()
-        messages = [{"role": h.role, "content": h.content} for h in history]
-        messages.append({"role": "user", "content": user_message})
+    # Load properties
+    all_properties = load_properties()
 
-        # Agentic loop
-        while True:
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
-                system=_build_system_prompt(customer_name),
-                tools=TOOLS,
-                messages=messages,
-            )
+    # Build message history
+    messages = (messages_history or []).copy()
+    messages.append({"role": "user", "content": user_message})
 
-            # Collect text blocks for the final reply
-            text_parts = [b.text for b in response.content if b.type == "text"]
+    # Agentic loop
+    while True:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            system=_build_system_prompt(customer_name),
+            tools=TOOLS,
+            messages=messages,
+        )
 
-            if response.stop_reason == "end_turn":
-                final_text = "\n".join(text_parts)
-                # Persist exchange
-                session.add(Conversation(role="user", content=user_message))
-                session.add(Conversation(role="assistant", content=final_text))
-                session.commit()
-                return final_text
+        # Collect text blocks for the final reply
+        text_parts = [b.text for b in response.content if b.type == "text"]
 
-            if response.stop_reason == "tool_use":
-                # Execute all tool calls
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        result = _execute_tool(
-                            block.name, block.input, session, customer_name
-                        )
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, default=str),
-                        })
+        if response.stop_reason == "end_turn":
+            final_text = "\n".join(text_parts)
+            return final_text
 
-                # Add assistant turn + tool results to messages
-                messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": tool_results})
-                continue
+        if response.stop_reason == "tool_use":
+            # Execute all tool calls
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = _execute_tool(
+                        block.name, block.input, customer_name, all_properties
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    })
 
-            # Unexpected stop reason
-            break
+            # Add assistant turn + tool results to messages
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+            continue
 
-        final_text = "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
-        session.add(Conversation(role="user", content=user_message))
-        session.add(Conversation(role="assistant", content=final_text))
-        session.commit()
-        return final_text
+        # Unexpected stop reason
+        break
+
+    final_text = "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
+    return final_text
 
 
 def reset_conversation(keep_preferences: bool = False) -> dict:
     """Clear conversation history. Optionally keep preferences."""
-    with get_session() as session:
-        session.query(Conversation).delete()
-        if not keep_preferences:
-            session.query(SavedProperty).delete()
-            session.query(Preferences).delete()
-        session.commit()
+    _store.clear(keep_preferences=keep_preferences)
     return {"status": "reset"}
