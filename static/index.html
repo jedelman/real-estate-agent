@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Personal Real Estate Agent</title>
+  <style>
+    /* ------------------------------------------------------------------ Reset */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ------------------------------------------------------------------ Tokens */
+    :root {
+      --bg: #f7f5f2;
+      --surface: #ffffff;
+      --surface2: #f0ede8;
+      --border: #e2ddd6;
+      --accent: #2d6a4f;
+      --accent-light: #e8f4ee;
+      --accent2: #b7791f;
+      --text: #1a1814;
+      --text-muted: #706b62;
+      --bubble-user: #2d6a4f;
+      --bubble-agent: #ffffff;
+      --radius: 14px;
+      --shadow: 0 2px 12px rgba(0,0,0,.08);
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* ------------------------------------------------------------------ Layout */
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      grid-template-rows: 100%;
+      overflow: hidden;
+    }
+
+    /* ------------------------------------------------------------------ Sidebar */
+    #sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #sidebar-header {
+      padding: 20px 18px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #sidebar-header h1 {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -.3px;
+      color: var(--accent);
+    }
+
+    #sidebar-header p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    #sidebar-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 10px 0;
+      font-size: 12px;
+      font-weight: 600;
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: color .15s, border-bottom .15s;
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .tab-panel { display: none; flex: 1; overflow-y: auto; padding: 14px; }
+    .tab-panel.active { display: block; }
+
+    /* ------------------------------------------------------------------ Preference panel */
+    .pref-section { margin-bottom: 16px; }
+
+    .pref-section h3 {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .pref-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      padding: 4px 0;
+    }
+
+    .pref-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .tag {
+      display: inline-block;
+      background: var(--accent-light);
+      color: var(--accent);
+      border-radius: 20px;
+      padding: 2px 9px;
+      font-size: 12px;
+      font-weight: 500;
+      margin: 2px 2px 2px 0;
+    }
+
+    .tag.deal-breaker {
+      background: #fde8e8;
+      color: #c0392b;
+    }
+
+    #prefs-empty {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 30px 10px;
+      line-height: 1.6;
+    }
+
+    /* ------------------------------------------------------------------ Saved panel */
+    .saved-card {
+      background: var(--surface2);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+
+    .saved-card .addr { font-weight: 600; font-size: 13px; }
+    .saved-card .price { color: var(--accent); font-weight: 700; font-size: 14px; margin-top: 2px; }
+    .saved-card .stats { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      margin-top: 6px;
+    }
+
+    .status-liked    { background: var(--accent-light); color: var(--accent); }
+    .status-disliked { background: #fde8e8; color: #c0392b; }
+    .status-touring  { background: #fff3cd; color: #856404; }
+    .status-offered  { background: #d1ecf1; color: #0c5460; }
+
+    .rationale {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+      font-style: italic;
+      line-height: 1.4;
+    }
+
+    #saved-empty {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 30px 10px;
+      line-height: 1.6;
+    }
+
+    /* ------------------------------------------------------------------ Chat area */
+    #chat-area {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #chat-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    #chat-header .agent-info { display: flex; align-items: center; gap: 12px; }
+
+    #agent-avatar {
+      width: 38px; height: 38px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+
+    #chat-header h2 { font-size: 15px; font-weight: 700; }
+    #chat-header p  { font-size: 12px; color: var(--text-muted); }
+
+    #reset-btn {
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: none;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: background .15s;
+    }
+    #reset-btn:hover { background: var(--surface2); }
+
+    /* ------------------------------------------------------------------ Messages */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .msg-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+    }
+
+    .msg-row.user { flex-direction: row-reverse; }
+
+    .bubble {
+      max-width: 72%;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      line-height: 1.55;
+      font-size: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .msg-row.user .bubble {
+      background: var(--bubble-user);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .msg-row.agent .bubble {
+      background: var(--bubble-agent);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+
+    /* Markdown-like formatting inside bubbles */
+    .bubble strong { font-weight: 700; }
+    .bubble em { font-style: italic; }
+
+    .bubble p { margin-bottom: .6em; }
+    .bubble p:last-child { margin-bottom: 0; }
+
+    .bubble ul, .bubble ol {
+      padding-left: 18px;
+      margin: .4em 0 .6em;
+    }
+
+    .bubble li { margin-bottom: .3em; }
+
+    .bubble h3 {
+      font-size: 14px;
+      font-weight: 700;
+      margin: .8em 0 .3em;
+      color: var(--accent);
+    }
+
+    .bubble h3:first-child { margin-top: 0; }
+
+    /* Property card inside bubble */
+    .prop-card {
+      background: var(--surface2);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin: 8px 0;
+      border-left: 3px solid var(--accent);
+    }
+
+    .prop-card .prop-addr { font-weight: 700; font-size: 14px; }
+    .prop-card .prop-price {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--accent);
+      margin: 2px 0;
+    }
+    .prop-card .prop-stats { font-size: 12px; color: var(--text-muted); }
+    .prop-card .prop-match {
+      font-size: 12px;
+      background: var(--accent-light);
+      color: var(--accent);
+      padding: 3px 8px;
+      border-radius: 20px;
+      display: inline-block;
+      margin-top: 6px;
+      font-weight: 600;
+    }
+
+    .avatar-mini {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+
+    /* ------------------------------------------------------------------ Typing indicator */
+    .typing-indicator {
+      display: flex; gap: 4px; align-items: center;
+      padding: 12px 16px;
+    }
+
+    .typing-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      animation: blink 1.2s infinite;
+    }
+
+    .typing-dot:nth-child(2) { animation-delay: .2s; }
+    .typing-dot:nth-child(3) { animation-delay: .4s; }
+
+    @keyframes blink {
+      0%, 80%, 100% { opacity: .2; transform: scale(.8); }
+      40%           { opacity: 1;  transform: scale(1); }
+    }
+
+    /* ------------------------------------------------------------------ Input */
+    #input-area {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    #msg-input {
+      flex: 1;
+      resize: none;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+      max-height: 120px;
+      outline: none;
+      transition: border-color .15s;
+      background: var(--bg);
+    }
+
+    #msg-input:focus { border-color: var(--accent); }
+
+    #send-btn {
+      width: 42px; height: 42px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: none;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background .15s, transform .1s;
+    }
+
+    #send-btn:hover { background: #235c40; }
+    #send-btn:active { transform: scale(.93); }
+    #send-btn:disabled { background: var(--border); cursor: not-allowed; }
+
+    #send-btn svg { color: #fff; }
+
+    /* ------------------------------------------------------------------ Responsive */
+    @media (max-width: 680px) {
+      body { grid-template-columns: 1fr; }
+      #sidebar { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ----------------------------------------------------------------- Sidebar -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>Your Home Profile</h1>
+    <p>Updated live as you chat</p>
+  </div>
+
+  <div id="sidebar-tabs">
+    <button class="tab-btn active" data-tab="prefs">Preferences</button>
+    <button class="tab-btn" data-tab="saved">Saved</button>
+  </div>
+
+  <div id="tab-prefs" class="tab-panel active">
+    <div id="prefs-content">
+      <div id="prefs-empty">
+        Start chatting and I'll build your home profile automatically.
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-saved" class="tab-panel">
+    <div id="saved-content">
+      <div id="saved-empty">No saved properties yet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ----------------------------------------------------------------- Chat -->
+<div id="chat-area">
+  <div id="chat-header">
+    <div class="agent-info">
+      <div id="agent-avatar">🏡</div>
+      <div>
+        <h2>Cassie</h2>
+        <p>Your Personal Real Estate Agent</p>
+      </div>
+    </div>
+    <button id="reset-btn" title="Start over">Start over</button>
+  </div>
+
+  <div id="messages"></div>
+
+  <div id="input-area">
+    <textarea id="msg-input" rows="1" placeholder="Tell me what you're looking for…"></textarea>
+    <button id="send-btn" aria-label="Send">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script>
+// ------------------------------------------------------------------ Helpers
+
+function fmt(n) {
+  if (!n) return "—";
+  return "$" + Number(n).toLocaleString();
+}
+
+function fmtNum(n) {
+  if (!n && n !== 0) return "—";
+  return Number(n).toLocaleString();
+}
+
+// Very minimal markdown renderer (bold, italic, h3, ul, ol, paragraphs)
+function renderMarkdown(text) {
+  // Escape HTML
+  let t = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Property shortcodes: [[PROP:external_id]] rendered as cards
+  // (agent may include these – handled below)
+
+  // ### Heading
+  t = t.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+
+  // **bold** and *italic*
+  t = t.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/\*(.+?)\*/g, "<em>$1</em>");
+
+  // Unordered list
+  t = t.replace(/^[-•] (.+)$/gm, "<li>$1</li>");
+  t = t.replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+
+  // Ordered list
+  t = t.replace(/^\d+\. (.+)$/gm, "<li>$1</li>");
+
+  // Paragraphs
+  const lines = t.split("\n");
+  let html = "";
+  let inList = false;
+  for (const line of lines) {
+    if (line.startsWith("<ul>") || line.startsWith("<li>") || line.startsWith("<h3>")) {
+      html += line;
+    } else if (line.trim() === "") {
+      html += "";
+    } else {
+      html += `<p>${line}</p>`;
+    }
+  }
+  return html;
+}
+
+// ------------------------------------------------------------------ Sidebar
+
+async function refreshSidebar() {
+  await Promise.all([refreshPrefs(), refreshSaved()]);
+}
+
+async function refreshPrefs() {
+  const res = await fetch("/api/preferences");
+  const p = await res.json();
+  const el = document.getElementById("prefs-content");
+
+  const hasAny = p.budget_max || (p.target_cities && p.target_cities.length) ||
+                 p.bedrooms_min || p.preferred_styles?.length || p.deal_breakers?.length;
+  if (!hasAny) {
+    el.innerHTML = `<div id="prefs-empty">Start chatting and I'll build your home profile automatically.</div>`;
+    return;
+  }
+
+  let html = "";
+
+  if (p.budget_min || p.budget_max) {
+    html += section("Budget", `
+      <div class="pref-row">
+        <div class="pref-dot"></div>
+        ${p.budget_min ? fmt(p.budget_min) + " – " : ""}${fmt(p.budget_max)}
+      </div>
+    `);
+  }
+
+  if (p.target_cities?.length) {
+    html += section("Locations", p.target_cities.map(c => `<span class="tag">${c}</span>`).join(""));
+  }
+
+  if (p.target_neighborhoods?.length) {
+    html += section("Neighborhoods", p.target_neighborhoods.map(n => `<span class="tag">${n}</span>`).join(""));
+  }
+
+  const physRows = [];
+  if (p.bedrooms_min) physRows.push(`${p.bedrooms_min}+ beds`);
+  if (p.bathrooms_min) physRows.push(`${p.bathrooms_min}+ baths`);
+  if (p.sqft_min) physRows.push(`${fmtNum(p.sqft_min)}+ sqft`);
+  if (physRows.length) {
+    html += section("Size", physRows.map(r => `<div class="pref-row"><div class="pref-dot"></div>${r}</div>`).join(""));
+  }
+
+  if (p.preferred_styles?.length) {
+    html += section("Style", p.preferred_styles.map(s => `<span class="tag">${s}</span>`).join(""));
+  }
+
+  if (p.preferred_vibes?.length) {
+    html += section("Vibes", p.preferred_vibes.map(v => `<span class="tag">${v}</span>`).join(""));
+  }
+
+  const mustHaves = [];
+  if (p.needs_home_office) mustHaves.push("Home office");
+  if (p.needs_pool) mustHaves.push("Pool");
+  if (p.needs_good_schools) mustHaves.push("Good schools");
+  if (p.needs_single_story) mustHaves.push("Single story");
+  if (p.needs_open_floor_plan) mustHaves.push("Open floor plan");
+  if (p.needs_walkability) mustHaves.push("Walkability");
+  if (p.needs_large_yard) mustHaves.push("Large yard");
+  if (mustHaves.length) {
+    html += section("Must-haves", mustHaves.map(m => `<span class="tag">${m}</span>`).join(""));
+  }
+
+  if (p.deal_breakers?.length) {
+    html += section("Deal-breakers", p.deal_breakers.map(d => `<span class="tag deal-breaker">${d}</span>`).join(""));
+  }
+
+  if (p.extra_preferences && Object.keys(p.extra_preferences).length) {
+    const extras = Object.entries(p.extra_preferences)
+      .map(([k, v]) => `<div class="pref-row"><div class="pref-dot"></div><span>${k}: ${v}</span></div>`)
+      .join("");
+    html += section("Other", extras);
+  }
+
+  el.innerHTML = html;
+}
+
+function section(title, body) {
+  return `<div class="pref-section"><h3>${title}</h3>${body}</div>`;
+}
+
+async function refreshSaved() {
+  const res = await fetch("/api/saved");
+  const saved = await res.json();
+  const el = document.getElementById("saved-content");
+
+  if (!saved.length) {
+    el.innerHTML = `<div id="saved-empty">No saved properties yet.</div>`;
+    return;
+  }
+
+  el.innerHTML = saved.map(s => `
+    <div class="saved-card">
+      <div class="addr">${s.address}</div>
+      <div class="price">${fmt(s.price)}</div>
+      <div class="stats">${s.bedrooms}bd / ${s.bathrooms}ba &nbsp;·&nbsp; ${fmtNum(s.sqft)} sqft &nbsp;·&nbsp; ${s.city}</div>
+      <div><span class="status-badge status-${s.saved_status}">${s.saved_status}</span></div>
+      ${s.agent_rationale ? `<div class="rationale">${s.agent_rationale}</div>` : ""}
+    </div>
+  `).join("");
+}
+
+// ------------------------------------------------------------------ Messages
+
+const messagesEl = document.getElementById("messages");
+
+function appendMessage(role, text) {
+  const row = document.createElement("div");
+  row.className = `msg-row ${role}`;
+
+  if (role === "agent") {
+    const avatar = document.createElement("div");
+    avatar.className = "avatar-mini";
+    avatar.textContent = "🏡";
+    row.appendChild(avatar);
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = renderMarkdown(text);
+  row.appendChild(bubble);
+
+  messagesEl.appendChild(row);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return row;
+}
+
+function showTyping() {
+  const row = document.createElement("div");
+  row.className = "msg-row agent";
+  row.id = "typing-row";
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar-mini";
+  avatar.textContent = "🏡";
+  row.appendChild(avatar);
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = `<div class="typing-indicator">
+    <div class="typing-dot"></div>
+    <div class="typing-dot"></div>
+    <div class="typing-dot"></div>
+  </div>`;
+  row.appendChild(bubble);
+
+  messagesEl.appendChild(row);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hideTyping() {
+  const row = document.getElementById("typing-row");
+  if (row) row.remove();
+}
+
+// ------------------------------------------------------------------ Send
+
+const input = document.getElementById("msg-input");
+const sendBtn = document.getElementById("send-btn");
+
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 120) + "px";
+});
+
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+sendBtn.addEventListener("click", sendMessage);
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = "";
+  input.style.height = "auto";
+  sendBtn.disabled = true;
+
+  appendMessage("user", text);
+  showTyping();
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    const data = await res.json();
+    hideTyping();
+
+    if (data.reply) {
+      appendMessage("agent", data.reply);
+    } else if (data.detail) {
+      appendMessage("agent", `Sorry, something went wrong: ${data.detail}`);
+    }
+
+    await refreshSidebar();
+  } catch (err) {
+    hideTyping();
+    appendMessage("agent", "Sorry, I couldn't connect to the server. Please try again.");
+  }
+
+  sendBtn.disabled = false;
+  input.focus();
+}
+
+// ------------------------------------------------------------------ Reset
+
+document.getElementById("reset-btn").addEventListener("click", async () => {
+  if (!confirm("Start a fresh conversation? Your preferences will also be cleared.")) return;
+  await fetch("/api/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keep_preferences: false }),
+  });
+  messagesEl.innerHTML = "";
+  await refreshSidebar();
+  // Trigger first message
+  await autoGreet();
+});
+
+// ------------------------------------------------------------------ Tabs
+
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+  });
+});
+
+// ------------------------------------------------------------------ Init
+
+async function autoGreet() {
+  showTyping();
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Hello! Please greet me and start our first conversation." }),
+    });
+    const data = await res.json();
+    hideTyping();
+    if (data.reply) appendMessage("agent", data.reply);
+    await refreshSidebar();
+  } catch (e) {
+    hideTyping();
+    appendMessage("agent", "Hi! I'm Cassie, your personal real estate agent. What kind of home are you looking for?");
+  }
+}
+
+(async () => {
+  await refreshSidebar();
+  // Only greet if no prior conversation exists
+  const res = await fetch("/api/preferences");
+  const prefs = await res.json();
+  const hasHistory = prefs && Object.keys(prefs).length > 0;
+
+  if (!hasHistory) {
+    await autoGreet();
+  } else {
+    appendMessage("agent", "Welcome back! Your preferences are loaded. What would you like to explore today?");
+  }
+})();
+</script>
+</body>
+</html>
