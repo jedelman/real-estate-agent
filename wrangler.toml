@@ -1,0 +1,14 @@
+name            = "real-estate-agent"
+compatibility_date = "2024-09-23"
+
+# D1 database binding
+# database_id is set by the deploy-d1 workflow and written back as a
+# GitHub Actions variable (CF_D1_DATABASE_ID). Update this value after
+# the first successful workflow run.
+[[d1_databases]]
+binding      = "DB"
+database_name = "real-estate-agent"
+database_id  = "placeholder-set-after-first-deploy"
+
+[vars]
+ENVIRONMENT = "production"

@@ -1,0 +1,120 @@
+name: Deploy D1 Infrastructure
+
+# Trigger on changes to DB schema or manually
+on:
+  push:
+    branches: [main]
+    paths:
+      - "db/migrations/**"
+      - "wrangler.toml"
+  workflow_dispatch:
+    inputs:
+      force_recreate:
+        description: "Delete and recreate the database (DESTRUCTIVE)"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  deploy-d1:
+    name: Create database + apply migrations
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # needed to write the database ID back to wrangler.toml
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install wrangler
+        run: npm install -g wrangler@latest
+
+      # -----------------------------------------------------------------------
+      # Create the D1 database (idempotent — wrangler exits 0 if it exists)
+      # -----------------------------------------------------------------------
+      - name: Create D1 database
+        id: create_db
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          if [ "${{ inputs.force_recreate }}" = "true" ]; then
+            echo "⚠️  Force-recreating database..."
+            wrangler d1 delete real-estate-agent --skip-confirmation || true
+          fi
+
+          # Create or get existing — capture JSON output for the ID
+          OUTPUT=$(wrangler d1 create real-estate-agent --json 2>/dev/null || \
+                   wrangler d1 info real-estate-agent --json 2>/dev/null)
+
+          DB_ID=$(echo "$OUTPUT" | jq -r '.uuid // .result.uuid // empty')
+
+          if [ -z "$DB_ID" ]; then
+            echo "❌ Could not determine database ID"
+            exit 1
+          fi
+
+          echo "db_id=$DB_ID" >> "$GITHUB_OUTPUT"
+          echo "✅ Database ID: $DB_ID"
+
+      # -----------------------------------------------------------------------
+      # Apply migrations
+      # -----------------------------------------------------------------------
+      - name: Apply migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          wrangler d1 migrations apply real-estate-agent \
+            --migrations-dir db/migrations \
+            --remote
+
+      # -----------------------------------------------------------------------
+      # Write the database ID back into wrangler.toml and commit
+      # (so future wrangler commands pick up the real ID automatically)
+      # -----------------------------------------------------------------------
+      - name: Update wrangler.toml with real database ID
+        env:
+          DB_ID: ${{ steps.create_db.outputs.db_id }}
+        run: |
+          sed -i "s/database_id  = \"placeholder-set-after-first-deploy\"/database_id  = \"$DB_ID\"/" wrangler.toml
+          echo "Updated wrangler.toml with database_id = $DB_ID"
+
+      - name: Commit updated wrangler.toml
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update wrangler.toml with D1 database ID [skip ci]"
+          file_pattern: wrangler.toml
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+
+      # -----------------------------------------------------------------------
+      # Save the database ID as a GitHub Actions variable for downstream use
+      # -----------------------------------------------------------------------
+      - name: Save database ID to GitHub variable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DB_ID: ${{ steps.create_db.outputs.db_id }}
+        run: |
+          gh variable set CF_D1_DATABASE_ID --body "$DB_ID" || \
+            echo "::warning::Could not write GitHub variable (check repo permissions)"
+
+      - name: Summary
+        env:
+          DB_ID: ${{ steps.create_db.outputs.db_id }}
+        run: |
+          echo "## D1 Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Database | real-estate-agent |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Database ID | \`$DB_ID\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Migrations | ✅ Applied |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Add these secrets to your repo before running:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`CF_API_TOKEN\` — Cloudflare API token (D1 Edit permission)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`CF_ACCOUNT_ID\` — Your Cloudflare account ID" >> "$GITHUB_STEP_SUMMARY"

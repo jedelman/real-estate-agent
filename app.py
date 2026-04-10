@@ -1,10 +1,10 @@
 """Streamlit app — real estate agent powered by Claude Managed Agents.
 
-Architecture:
-  - Managed Agent (Anthropic cloud): web_search + web_fetch for real listings
-  - Preference Extractor: haiku call after each response to capture signals
-  - PreferencesStore / ConfigStore: JSON persistence (D1-swappable)
-  - Streamlit: UI + session orchestration
+Layout:
+  Left (chat):     Conversation with Cassie
+  Right (panel):   Property cards extracted from each response;
+                   reaction buttons feed back into the agent session
+  Sidebar:         Buyer profile (preferences + saved)
 """
 
 import os
@@ -15,14 +15,19 @@ from dotenv import load_dotenv
 
 from src.extractor import extract_and_apply
 from src.managed_agent import build_greeting_prompt, provision, send_user_event, stream_message
+from src.property_panel import extract_properties, reaction_message, render_property_cards
 from src.storage import AppConfig, ConfigStore, PreferencesStore
 
 load_dotenv()
 
-st.set_page_config(page_title="Your Real Estate Agent", page_icon="🏡", layout="wide")
+st.set_page_config(
+    page_title="Your Real Estate Agent",
+    page_icon="🏡",
+    layout="wide",
+)
 
 # ---------------------------------------------------------------------------
-# Singletons — one store per process (ValueModels fix)
+# Singletons
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
@@ -52,10 +57,8 @@ def run_onboarding():
         agent_name = st.text_input(
             "What would you like to call your agent?", value="Cassie"
         )
-        agent_gender = st.radio(
-            "Agent pronouns", ["She/Her", "He/Him", "They/Them"],
-            horizontal=True, index=0,
-        )
+        st.radio("Agent pronouns", ["She/Her", "He/Him", "They/Them"],
+                 horizontal=True, index=0)
 
         st.divider()
         submitted = st.form_submit_button("Let's get started →", use_container_width=True)
@@ -75,7 +78,7 @@ def run_onboarding():
 
 
 # ---------------------------------------------------------------------------
-# Load config (gate on onboarding)
+# Load config — gate on onboarding
 # ---------------------------------------------------------------------------
 
 if "cfg" not in st.session_state:
@@ -87,21 +90,25 @@ if "cfg" not in st.session_state:
 
 cfg: AppConfig = st.session_state.cfg
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "session_id" not in st.session_state:
-    st.session_state.session_id = cfg.session_id  # resume if exists
-if "initialized" not in st.session_state:
-    st.session_state.initialized = False
+# Session state defaults
+for key, default in [
+    ("messages", []),
+    ("session_id", cfg.session_id),
+    ("initialized", False),
+    ("property_cards", []),   # accumulated across the whole conversation
+    ("reactions", {}),        # prop_key → "liked"|"disliked"|"touring"
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Sidebar — buyer profile
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
     prefs = pref_store.get(cfg.customer_name)
-    st.markdown(f"### {cfg.customer_name}'s Home Profile")
+    st.markdown(f"### {cfg.customer_name}'s Profile")
     st.caption(f"Agent: {cfg.agent_name}")
 
     has_prefs = any([
@@ -123,14 +130,12 @@ with st.sidebar:
                     st.metric("Min Sqft", f"{prefs.sqft_min:,.0f}")
                 if prefs.bathrooms_min:
                     st.metric("Min Baths", prefs.bathrooms_min)
-
             if prefs.target_cities:
                 st.write("**Cities:**", ", ".join(prefs.target_cities))
             if prefs.preferred_styles:
                 st.write("**Style:**", ", ".join(prefs.preferred_styles))
             if prefs.preferred_vibes:
                 st.write("**Vibes:**", ", ".join(prefs.preferred_vibes))
-
             must_haves = [
                 lbl for flag, lbl in [
                     (prefs.needs_home_office, "Home office"),
@@ -148,7 +153,7 @@ with st.sidebar:
             if prefs.deal_breakers:
                 st.write("**Deal-breakers:**", ", ".join(prefs.deal_breakers))
     else:
-        st.info(f"👉 Start chatting with {cfg.agent_name} to build your profile!")
+        st.info(f"👉 Chat with {cfg.agent_name} to build your profile!")
 
     saved = pref_store.get_saved()
     liked = [s for s in saved if s.status == "liked"]
@@ -166,14 +171,17 @@ with st.sidebar:
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🔄 New chat", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.session_id = None
-            st.session_state.initialized = False
+            st.session_state.update({
+                "messages": [],
+                "session_id": None,
+                "initialized": False,
+                "property_cards": [],
+                "reactions": {},
+            })
             config_store.update(session_id=None)
             st.rerun()
     with col_b:
         if st.button("⚙️ Setup", use_container_width=True):
-            # Clear everything including managed agent IDs so next run reprovisioned
             config_store.update(
                 setup_complete=False,
                 session_id=None,
@@ -181,24 +189,91 @@ with st.sidebar:
                 environment_id=None,
             )
             pref_store.clear(keep_preferences=False)
-            for k in ["cfg", "messages", "session_id", "initialized"]:
+            for k in ["cfg", "messages", "session_id", "initialized",
+                      "property_cards", "reactions"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# Chat
+# Main layout: chat (left) | property panel (right)
 # ---------------------------------------------------------------------------
 
-st.subheader(f"Chat with {cfg.agent_name}", anchor=False)
+col_chat, col_panel = st.columns([3, 2], gap="large")
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
 
+# ---------------------------------------------------------------------------
+# Property panel (right column)
+# ---------------------------------------------------------------------------
+
+with col_panel:
+    st.subheader("Properties", anchor=False)
+
+    def handle_reaction(prop: dict, reaction: str, notes: str, key: str):
+        """Save reaction, update UI state, and send feedback to the agent."""
+        # Persist to storage
+        entry = PreferencesStore.SavedEntry(
+            external_id=key,
+            address=prop.get("address", ""),
+            price=prop.get("price", 0),
+            status=reaction,
+            notes=notes,
+            agent_rationale=prop.get("why_it_matches", ""),
+        )
+        pref_store.save_property(entry)
+
+        # Update local reaction state
+        st.session_state.reactions[key] = reaction
+
+        # Build and display feedback message in chat
+        feedback = reaction_message(prop, reaction, notes)
+        st.session_state.messages.append({"role": "user", "content": feedback})
+
+        # Send to managed agent session
+        if st.session_state.session_id:
+            try:
+                send_user_event(st.session_state.session_id, feedback)
+                # Stream the agent's response to the reaction
+                with col_chat:
+                    with st.chat_message("user"):
+                        st.markdown(feedback)
+                    with st.chat_message("assistant"):
+                        response_text = _stream_response(
+                            st.session_state.session_id,
+                            already_sent=True,  # already sent above
+                        )
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": response_text}
+                )
+                _post_process(response_text)
+            except Exception:
+                pass
+
+        st.rerun()
+
+    render_property_cards(
+        st.session_state.property_cards,
+        on_reaction=handle_reaction,
+        reactions=st.session_state.reactions,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat (left column)
+# ---------------------------------------------------------------------------
+
+with col_chat:
+    st.subheader(f"Chat with {cfg.agent_name}", anchor=False)
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+
+# ---------------------------------------------------------------------------
+# Helpers (defined after columns so they can render into col_chat / col_panel)
+# ---------------------------------------------------------------------------
 
 def _ensure_session() -> str:
-    """Provision a Managed Agent session if one doesn't exist yet."""
     if not st.session_state.session_id:
         prefs = pref_store.get(cfg.customer_name)
         session_id = provision(config_store, prefs)
@@ -206,29 +281,62 @@ def _ensure_session() -> str:
     return st.session_state.session_id
 
 
-def _stream_response(session_id: str, user_message: str) -> str:
-    """Send a message and stream the response into the chat. Returns full text."""
-    send_user_event(session_id, user_message)
+def _stream_response(session_id: str, user_message: str = "", already_sent: bool = False) -> str:
+    """Send (optionally) and stream a response. Returns full response text."""
+    if not already_sent and user_message:
+        send_user_event(session_id, user_message)
 
-    placeholder = st.empty()
+    with col_chat:
+        placeholder = st.empty()
+        tool_status = st.empty()
+
     full_text = ""
-    tool_status = st.empty()
-
     for event_type, chunk in stream_message(session_id):
         if event_type == "text":
             full_text += chunk
-            placeholder.markdown(full_text + "▌")
+            with col_chat:
+                placeholder.markdown(full_text + "▌")
         elif event_type == "tool":
-            tool_status.caption(f"🔍 Using {chunk}…")
+            with col_chat:
+                tool_status.caption(f"🔍 {chunk}…")
         elif event_type == "done":
-            tool_status.empty()
+            with col_chat:
+                tool_status.empty()
             break
 
-    placeholder.markdown(full_text)
+    with col_chat:
+        placeholder.markdown(full_text)
     return full_text
 
 
+def _post_process(response_text: str):
+    """After each response: extract preferences + extract property cards."""
+    conversation = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.messages
+    ]
+
+    def _run():
+        # Preference extraction (CHECKS pattern)
+        extract_and_apply(conversation, pref_store, cfg.customer_name)
+        # Property extraction
+        new_props = extract_properties(response_text)
+        if new_props:
+            # Dedupe by address
+            existing_addrs = {p.get("address") for p in st.session_state.property_cards}
+            for p in new_props:
+                if p.get("address") not in existing_addrs:
+                    st.session_state.property_cards.append(p)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=8)  # wait up to 8s so cards appear on the same rerun
+
+
+# ---------------------------------------------------------------------------
 # Auto-greet on first load
+# ---------------------------------------------------------------------------
+
 if not st.session_state.initialized:
     prefs = pref_store.get(cfg.customer_name)
     is_returning = any([prefs.budget_max, prefs.target_cities, prefs.bedrooms_min])
@@ -239,58 +347,59 @@ if not st.session_state.initialized:
             "What would you like to explore today?"
         )
         st.session_state.messages.append({"role": "assistant", "content": greeting})
-        with st.chat_message("assistant"):
-            st.markdown(greeting)
+        with col_chat:
+            with st.chat_message("assistant"):
+                st.markdown(greeting)
     else:
-        with st.chat_message("assistant"):
-            try:
-                session_id = _ensure_session()
-                prefs = pref_store.get(cfg.customer_name)
-                # Context block + greeting request — name is always injected fresh here
-                greeting_prompt = build_greeting_prompt(cfg.agent_name, cfg.customer_name, prefs)
-                greeting = _stream_response(session_id, greeting_prompt)
-                st.session_state.messages.append({"role": "assistant", "content": greeting})
-            except Exception as e:
-                fallback = (
-                    f"Hi {cfg.customer_name}! I'm {cfg.agent_name}, your personal "
-                    "real estate agent. What kind of home are you dreaming of?"
-                )
-                st.markdown(fallback)
-                st.session_state.messages.append({"role": "assistant", "content": fallback})
+        with col_chat:
+            with st.chat_message("assistant"):
+                try:
+                    session_id = _ensure_session()
+                    prefs = pref_store.get(cfg.customer_name)
+                    greeting_prompt = build_greeting_prompt(
+                        cfg.agent_name, cfg.customer_name, prefs
+                    )
+                    greeting = _stream_response(session_id, greeting_prompt)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": greeting}
+                    )
+                except Exception as e:
+                    fallback = (
+                        f"Hi {cfg.customer_name}! I'm {cfg.agent_name}, your personal "
+                        "real estate agent. What kind of home are you dreaming of?"
+                    )
+                    st.markdown(fallback)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": fallback}
+                    )
 
     st.session_state.initialized = True
 
 
-# Chat input
+# ---------------------------------------------------------------------------
+# Chat input (must be at page level, not inside a column)
+# ---------------------------------------------------------------------------
+
 user_input = st.chat_input(f"Message {cfg.agent_name}…")
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.markdown(user_input)
+    with col_chat:
+        with st.chat_message("user"):
+            st.markdown(user_input)
 
-    with st.chat_message("assistant"):
-        try:
-            session_id = _ensure_session()
-            response_text = _stream_response(session_id, user_input)
-        except Exception as e:
-            response_text = (
-                f"I'm having trouble connecting right now. "
-                f"Please check your API key and try again.\n\n`{e}`"
-            )
-            st.markdown(response_text)
+    with col_chat:
+        with st.chat_message("assistant"):
+            try:
+                session_id = _ensure_session()
+                response_text = _stream_response(session_id, user_input)
+            except Exception as e:
+                response_text = (
+                    f"I'm having trouble connecting. "
+                    f"Please check your API key and try again.\n\n`{e}`"
+                )
+                with col_chat:
+                    st.markdown(response_text)
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
-
-    # Extract preference signals in the background (CHECKS pattern)
-    conversation = [
-        {"role": m["role"], "content": m["content"]}
-        for m in st.session_state.messages
-    ]
-
-    def _extract():
-        extract_and_apply(conversation, pref_store, cfg.customer_name)
-
-    t = threading.Thread(target=_extract, daemon=True)
-    t.start()
-
-    st.rerun()  # Refresh sidebar with updated preferences
+    _post_process(response_text)
+    st.rerun()
