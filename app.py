@@ -20,6 +20,12 @@ from src.storage import AppConfig, ConfigStore, PreferencesStore
 
 load_dotenv()
 
+# Push Streamlit secrets into env vars so all modules can use os.environ uniformly
+for _k in ["ANTHROPIC_API_KEY", "STORAGE_BACKEND",
+           "CF_API_TOKEN", "CF_ACCOUNT_ID", "CF_D1_DATABASE_ID"]:
+    if _k not in os.environ and _k in st.secrets:
+        os.environ[_k] = st.secrets[_k]
+
 st.set_page_config(
     page_title="Your Real Estate Agent",
     page_icon="🏡",
