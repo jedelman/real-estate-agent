@@ -21,10 +21,13 @@ from src.storage import AppConfig, ConfigStore, PreferencesStore
 load_dotenv()
 
 # Push Streamlit secrets into env vars so all modules can use os.environ uniformly
-for _k in ["ANTHROPIC_API_KEY", "STORAGE_BACKEND",
-           "CF_API_TOKEN", "CF_ACCOUNT_ID", "CF_D1_DATABASE_ID"]:
-    if _k not in os.environ and _k in st.secrets:
-        os.environ[_k] = st.secrets[_k]
+try:
+    for _k in ["ANTHROPIC_API_KEY", "STORAGE_BACKEND",
+               "CF_API_TOKEN", "CF_ACCOUNT_ID", "CF_D1_DATABASE_ID"]:
+        if _k not in os.environ and _k in st.secrets:
+            os.environ[_k] = st.secrets[_k]
+except Exception:
+    pass  # no secrets file in local/test environments
 
 st.set_page_config(
     page_title="Your Real Estate Agent",
@@ -214,11 +217,10 @@ col_chat, col_panel = st.columns([3, 2], gap="large")
 # ---------------------------------------------------------------------------
 
 with col_panel:
-    st.subheader("Properties", anchor=False)
+    tab_suggest, tab_tracker = st.tabs(["💡 Suggested", "📋 Tracker"])
 
     def handle_reaction(prop: dict, reaction: str, notes: str, key: str):
         """Save reaction, update UI state, and send feedback to the agent."""
-        # Persist to storage
         entry = PreferencesStore.SavedEntry(
             external_id=key,
             address=prop.get("address", ""),
@@ -228,26 +230,21 @@ with col_panel:
             agent_rationale=prop.get("why_it_matches", ""),
         )
         pref_store.save_property(entry)
-
-        # Update local reaction state
         st.session_state.reactions[key] = reaction
 
-        # Build and display feedback message in chat
         feedback = reaction_message(prop, reaction, notes)
         st.session_state.messages.append({"role": "user", "content": feedback})
 
-        # Send to managed agent session
         if st.session_state.session_id:
             try:
                 send_user_event(st.session_state.session_id, feedback)
-                # Stream the agent's response to the reaction
                 with col_chat:
                     with st.chat_message("user"):
                         st.markdown(feedback)
                     with st.chat_message("assistant"):
                         response_text = _stream_response(
                             st.session_state.session_id,
-                            already_sent=True,  # already sent above
+                            already_sent=True,
                         )
                 st.session_state.messages.append(
                     {"role": "assistant", "content": response_text}
@@ -258,11 +255,80 @@ with col_panel:
 
         st.rerun()
 
-    render_property_cards(
-        st.session_state.property_cards,
-        on_reaction=handle_reaction,
-        reactions=st.session_state.reactions,
-    )
+    with tab_suggest:
+        render_property_cards(
+            st.session_state.property_cards,
+            on_reaction=handle_reaction,
+            reactions=st.session_state.reactions,
+        )
+
+    with tab_tracker:
+        _STATUS_LABELS = {
+            "offered": "🏷️ Offered",
+            "touring": "📅 Touring",
+            "liked": "❤️ Liked",
+            "disliked": "👎 Passed",
+        }
+        _STATUS_ORDER = ["offered", "touring", "liked", "disliked"]
+
+        tracker_saved = pref_store.get_saved()
+        if not tracker_saved:
+            st.info("React to suggested properties and they'll appear here.")
+        else:
+            by_status = {}
+            for s in tracker_saved:
+                by_status.setdefault(s.status, []).append(s)
+
+            for status in _STATUS_ORDER:
+                entries = by_status.get(status, [])
+                if not entries:
+                    continue
+                st.markdown(f"**{_STATUS_LABELS.get(status, status)}**")
+                for entry in entries:
+                    with st.container(border=True):
+                        c1, c2 = st.columns([3, 1])
+                        with c1:
+                            st.write(f"**{entry.address or entry.external_id}**")
+                            if entry.price:
+                                st.caption(f"${entry.price:,.0f}")
+                        with c2:
+                            statuses = list(_STATUS_LABELS.keys())
+                            new_status = st.selectbox(
+                                "status",
+                                statuses,
+                                index=statuses.index(entry.status),
+                                format_func=lambda s: _STATUS_LABELS[s],
+                                key=f"tracker_status_{entry.external_id}",
+                                label_visibility="collapsed",
+                            )
+                            if new_status != entry.status:
+                                entry.status = new_status
+                                pref_store.save_property(entry)
+                                st.rerun()
+
+                        with st.form(key=f"tracker_form_{entry.external_id}"):
+                            new_notes = st.text_area(
+                                "Notes",
+                                value=entry.notes or "",
+                                placeholder="Add notes for yourself and the agent…",
+                                height=80,
+                                label_visibility="collapsed",
+                            )
+                            cs, cd = st.columns(2)
+                            with cs:
+                                if st.form_submit_button("Save", use_container_width=True):
+                                    entry.notes = new_notes
+                                    pref_store.save_property(entry)
+                                    st.rerun()
+                            with cd:
+                                if st.form_submit_button("💬 Discuss", use_container_width=True):
+                                    entry.notes = new_notes
+                                    pref_store.save_property(entry)
+                                    msg = f"Let's talk more about {entry.address or entry.external_id}"
+                                    if new_notes:
+                                        msg += f". My note: {new_notes}"
+                                    st.session_state.pending_message = msg
+                                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +433,8 @@ if not st.session_state.initialized:
                     session_id = _ensure_session()
                     prefs = pref_store.get(cfg.customer_name)
                     greeting_prompt = build_greeting_prompt(
-                        cfg.agent_name, cfg.customer_name, prefs
+                        cfg.agent_name, cfg.customer_name, prefs,
+                        pref_store.get_saved(),
                     )
                     greeting = _stream_response(session_id, greeting_prompt)
                     st.session_state.messages.append(
@@ -390,7 +457,7 @@ if not st.session_state.initialized:
 # Chat input (must be at page level, not inside a column)
 # ---------------------------------------------------------------------------
 
-user_input = st.chat_input(f"Message {cfg.agent_name}…")
+user_input = st.chat_input(f"Message {cfg.agent_name}…") or st.session_state.pop("pending_message", None)
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     with col_chat:

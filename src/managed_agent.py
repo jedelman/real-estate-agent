@@ -59,16 +59,35 @@ the conversation reveals new preferences.
 """
 
 
-def _session_context_block(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+def _session_context_block(
+    agent_name: str, customer_name: str, prefs: Preferences, saved: list = None
+) -> str:
     """Injected as the opening of the first user turn in every new session."""
     today = datetime.utcnow().strftime("%B %d, %Y")
-    return (
-        f"[SESSION CONTEXT — {today}]\n"
-        f"Agent name: {agent_name}\n"
-        f"Customer name: {customer_name}\n"
-        f"Current preferences:\n{prefs.summary()}\n"
-        f"---\n"
-    )
+    lines = [
+        f"[SESSION CONTEXT — {today}]",
+        f"Agent name: {agent_name}",
+        f"Customer name: {customer_name}",
+        f"Current preferences:\n{prefs.summary()}",
+    ]
+    active = [s for s in (saved or []) if s.status != "disliked"]
+    if active:
+        lines.append("\nProperties already on the buyer's radar (reference these; don't re-present as new):")
+        status_emoji = {"liked": "❤️", "touring": "📅", "offered": "🏷️"}
+        for s in active:
+            badge = status_emoji.get(s.status, "•")
+            detail = f"  {badge} {s.address or s.external_id}"
+            if s.price:
+                detail += f" (${s.price:,.0f})"
+            if s.status != "liked":
+                detail += f" [{s.status}]"
+            if s.notes:
+                detail += f"\n     Buyer note: {s.notes}"
+            if s.agent_rationale:
+                detail += f"\n     Why it matched: {s.agent_rationale}"
+            lines.append(detail)
+    lines.append("---")
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +163,11 @@ def provision(config_store: ConfigStore, prefs: Preferences) -> str:
     return session.id
 
 
-def build_greeting_prompt(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+def build_greeting_prompt(
+    agent_name: str, customer_name: str, prefs: Preferences, saved: list = None
+) -> str:
     """First user message for a new session: context block + greeting request."""
-    context = _session_context_block(agent_name, customer_name, prefs)
+    context = _session_context_block(agent_name, customer_name, prefs, saved)
     return (
         context
         + f"Hello! Please introduce yourself as {agent_name} and warmly start "
@@ -155,10 +176,12 @@ def build_greeting_prompt(agent_name: str, customer_name: str, prefs: Preference
     )
 
 
-def build_context_prefix(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+def build_context_prefix(
+    agent_name: str, customer_name: str, prefs: Preferences, saved: list = None
+) -> str:
     """Prepend this to any user message in a *resumed* session after a refresh,
     so the agent is re-oriented without a full new session."""
-    return _session_context_block(agent_name, customer_name, prefs)
+    return _session_context_block(agent_name, customer_name, prefs, saved)
 
 
 # ---------------------------------------------------------------------------
