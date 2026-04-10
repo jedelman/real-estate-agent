@@ -14,7 +14,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from src.extractor import extract_and_apply
-from src.managed_agent import provision, send_user_event, stream_message
+from src.managed_agent import build_greeting_prompt, provision, send_user_event, stream_message
 from src.storage import AppConfig, ConfigStore, PreferencesStore
 
 load_dotenv()
@@ -173,7 +173,13 @@ with st.sidebar:
             st.rerun()
     with col_b:
         if st.button("⚙️ Setup", use_container_width=True):
-            config_store.update(setup_complete=False, session_id=None)
+            # Clear everything including managed agent IDs so next run reprovisioned
+            config_store.update(
+                setup_complete=False,
+                session_id=None,
+                managed_agent_id=None,
+                environment_id=None,
+            )
             pref_store.clear(keep_preferences=False)
             for k in ["cfg", "messages", "session_id", "initialized"]:
                 st.session_state.pop(k, None)
@@ -239,12 +245,9 @@ if not st.session_state.initialized:
         with st.chat_message("assistant"):
             try:
                 session_id = _ensure_session()
-                greeting_prompt = (
-                    f"Hello! My name is {cfg.customer_name}. "
-                    f"Please introduce yourself as {cfg.agent_name} and warmly "
-                    "start our first conversation about finding my dream home. "
-                    "Ask me one open question to get started — don't list requirements yet."
-                )
+                prefs = pref_store.get(cfg.customer_name)
+                # Context block + greeting request — name is always injected fresh here
+                greeting_prompt = build_greeting_prompt(cfg.agent_name, cfg.customer_name, prefs)
                 greeting = _stream_response(session_id, greeting_prompt)
                 st.session_state.messages.append({"role": "assistant", "content": greeting})
             except Exception as e:

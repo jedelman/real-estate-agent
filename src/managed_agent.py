@@ -1,13 +1,14 @@
 """Managed Agent lifecycle and session management.
 
-Creates the Anthropic Managed Agent once (storing the ID in config) and
-manages per-conversation sessions. The agent has unrestricted web access,
-using web_search and web_fetch to find real property listings.
+The agent definition contains only generic rules (no customer-specific info).
+Customer identity and preferences are injected fresh into every new session
+via the opening user message — so a name change in onboarding is reflected
+immediately without reprovisioning.
 
 Lifecycle:
-  - Agent definition: created once per deployment, referenced by ID
-  - Environment: created once per deployment, referenced by ID
-  - Session: created once per conversation, re-used for all turns
+  - Agent:        created once, stored as managed_agent_id in config.json
+  - Environment:  created once, stored as environment_id in config.json
+  - Session:      created once per conversation; session_id in config.json
 """
 
 import os
@@ -15,77 +16,108 @@ from datetime import datetime
 
 import anthropic
 
-from .storage import AppConfig, ConfigStore, Preferences
+from .storage import ConfigStore, Preferences
 
+# ---------------------------------------------------------------------------
+# Agent system prompt — generic, no customer-specific content
+# ---------------------------------------------------------------------------
 
-def _system_prompt(agent_name: str, customer_name: str, prefs: Preferences) -> str:
-    pref_summary = prefs.summary()
-    today = datetime.utcnow().strftime("%B %d, %Y")
-    return f"""\
-You are {agent_name}, a warm and highly skilled real estate agent helping \
-{customer_name} find her dream home. Today is {today}.
+_AGENT_SYSTEM = """\
+You are a warm, expert personal real estate agent. At the start of every \
+session you will receive a [SESSION CONTEXT] block that tells you:
+  - Your agent name for this session
+  - Your customer's name
+  - Their current home search preferences
 
-## {customer_name}'s current preferences
-{pref_summary}
-
-## Your core job
-1. **Find real properties.** Use web_search and web_fetch to find actual current \
-listings on Zillow, Redfin, Realtor.com, or local MLS sites. Never describe a \
-property you haven't retrieved from the web in this session.
-2. **Learn her preferences** through natural conversation. Every detail matters — \
-not just hard requirements, but vibes, lifestyle hints, and indirect signals.
-3. **Explain every match personally.** Connect each property's features to what \
-{customer_name} specifically told you. Don't just list stats.
-4. **Ask one follow-up question at a time** to sharpen your understanding.
+Use that context to personalize every response. Update your understanding as \
+the conversation reveals new preferences.
 
 ## Anti-hallucination rules (strictly enforced)
-- **Never invent or estimate property details.** Address, price, sqft, features, \
-  school district, HOA — use only values you retrieved from the web this session.
-- **Never describe a property you haven't fetched.** If web_search returns titles \
-  and snippets, use web_fetch to get the full listing before presenting it.
-- **If a search returns no results**, say so honestly. Do not substitute sample data.
-- **If you're unsure about any detail**, say so and go look it up.
+- **Never invent or estimate property details.** Address, price, sqft, \
+  features, school district, HOA — use only values you retrieved from the web \
+  in this session.
+- **Never describe a property you haven't fetched.** Use web_search to find \
+  candidates, then web_fetch the full listing page before presenting details.
+- **If a search returns no results**, say so honestly. Do not substitute \
+  invented listings.
+- **If you are unsure about any detail**, say so and look it up.
 - **Do not reference listings from a prior session** — you are starting fresh.
 
 ## Search strategy
-- Start with the buyer's known preferences (above) as search filters.
-- Try multiple sources if the first search is thin (Zillow → Redfin → Realtor.com).
-- Fetch full listing pages to get accurate details (price, beds/baths, sqft, features).
-- Extract and report: address, list price, beds, baths, sqft, lot size, year built, \
-  HOA fee, key features, school district, days on market, and listing URL.
+- Start with the buyer's preferences from [SESSION CONTEXT] as filters.
+- Try multiple sources if the first search is thin \
+  (Zillow → Redfin → Realtor.com → local broker sites).
+- Fetch full listing pages; extract: address, list price, beds, baths, sqft, \
+  lot size, year built, HOA fee, notable features, school district, \
+  days on market, and listing URL.
 
 ## Tone & style
 - Warm, perceptive, genuine — not salesy or scripted.
-- Lead with *why* a property matches her, then the facts.
+- Lead with *why* a property matches this specific buyer, then the facts.
+- Ask one follow-up question at a time to sharpen your understanding.
 - Never use filler phrases like "Great question!" or "Absolutely!".
-- Keep responses focused and personal.
 """
 
 
-def _get_client() -> anthropic.Anthropic:
+def _session_context_block(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+    """Injected as the opening of the first user turn in every new session."""
+    today = datetime.utcnow().strftime("%B %d, %Y")
+    return (
+        f"[SESSION CONTEXT — {today}]\n"
+        f"Agent name: {agent_name}\n"
+        f"Customer name: {customer_name}\n"
+        f"Current preferences:\n{prefs.summary()}\n"
+        f"---\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
-def provision(config_store: ConfigStore, prefs: Preferences) -> str:
-    """Ensure the Managed Agent and environment exist. Return session_id for a new session.
+def _clear_stale(config_store: ConfigStore, clear_agent: bool = False, clear_env: bool = False) -> None:
+    """Remove stale IDs from config so the next call recreates them."""
+    updates = {}
+    if clear_agent:
+        updates["managed_agent_id"] = None
+    if clear_env:
+        updates["environment_id"] = None
+    updates["session_id"] = None
+    config_store.update(**updates)
 
-    Creates the agent + environment on first call and stores their IDs in
-    config.json for reuse. Always creates a fresh session (one per conversation).
+
+# ---------------------------------------------------------------------------
+# Provisioning
+# ---------------------------------------------------------------------------
+
+def provision(config_store: ConfigStore, prefs: Preferences) -> str:
+    """Ensure agent + environment exist; create and return a new session_id.
+
+    On first call: creates the Managed Agent and environment and saves their
+    IDs to config.json. Subsequent calls reuse those IDs.
+
+    Always creates a fresh session (one per conversation).
+    If an API call fails because a stored ID is stale (deleted in console),
+    clears the stale ID and retries once.
     """
     cfg = config_store.load()
-    client = _get_client()
+    client = _client()
 
-    # Create agent if not yet provisioned
+    # -- Agent --
     if not cfg.managed_agent_id:
         agent = client.beta.agents.create(
-            name=f"{cfg.agent_name} — Real Estate Agent",
-            model="claude-sonnet-4-6",  # Sonnet for web browsing quality
-            system=_system_prompt(cfg.agent_name, cfg.customer_name, prefs),
+            name="Real Estate Agent",
+            model="claude-sonnet-4-6",
+            system=_AGENT_SYSTEM,
             tools=[{"type": "agent_toolset_20260401"}],
         )
         cfg = config_store.update(managed_agent_id=agent.id)
 
-    # Create environment if not yet provisioned
+    # -- Environment --
     if not cfg.environment_id:
         env = client.beta.environments.create(
             name="real-estate-agent-env",
@@ -96,32 +128,63 @@ def provision(config_store: ConfigStore, prefs: Preferences) -> str:
         )
         cfg = config_store.update(environment_id=env.id)
 
-    # Always start a fresh session for each conversation
-    session = client.beta.sessions.create(
-        agent=cfg.managed_agent_id,
-        environment_id=cfg.environment_id,
-        title=f"Session for {cfg.customer_name} — {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-    )
+    # -- Session --
+    try:
+        session = client.beta.sessions.create(
+            agent=cfg.managed_agent_id,
+            environment_id=cfg.environment_id,
+            title=f"{cfg.customer_name} — {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+        )
+    except anthropic.NotFoundError:
+        # Agent or environment was deleted from the console — reprovision both
+        _clear_stale(config_store, clear_agent=True, clear_env=True)
+        return provision(config_store, prefs)  # one retry
+
     config_store.update(session_id=session.id)
     return session.id
 
 
+def build_greeting_prompt(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+    """First user message for a new session: context block + greeting request."""
+    context = _session_context_block(agent_name, customer_name, prefs)
+    return (
+        context
+        + f"Hello! Please introduce yourself as {agent_name} and warmly start "
+        "our first home-search conversation. Ask me one open question to get "
+        "started — don't list requirements yet."
+    )
+
+
+def build_context_prefix(agent_name: str, customer_name: str, prefs: Preferences) -> str:
+    """Prepend this to any user message in a *resumed* session after a refresh,
+    so the agent is re-oriented without a full new session."""
+    return _session_context_block(agent_name, customer_name, prefs)
+
+
+# ---------------------------------------------------------------------------
+# Messaging
+# ---------------------------------------------------------------------------
+
+def send_user_event(session_id: str, message: str) -> None:
+    client = _client()
+    client.beta.sessions.events.send(
+        session_id,
+        events=[{
+            "type": "user.message",
+            "content": [{"type": "text", "text": message}],
+        }],
+    )
+
+
 def stream_message(session_id: str):
-    """Generator that yields (event_type, text_chunk) tuples from an open SSE stream.
+    """Yield (event_type, chunk) from the SSE stream.
 
-    Caller is responsible for sending the user event before or after opening
-    the stream. This generator processes SSE events and yields:
-      ("text", str)        — text delta to display
-      ("tool", str)        — tool name being used (for status display)
-      ("done", "")         — agent reached idle state
-
-    Usage:
-        session_id = provision(config_store, prefs)
-        send_user_event(session_id, user_message)
-        for event_type, chunk in stream_message(session_id):
-            ...
+    Types:
+      ("text", str)   — text to display
+      ("tool", str)   — tool name being invoked
+      ("done", "")    — agent reached idle state
     """
-    client = _get_client()
+    client = _client()
     with client.beta.sessions.events.stream(session_id) as stream:
         for event in stream:
             match event.type:
@@ -134,34 +197,3 @@ def stream_message(session_id: str):
                 case "session.status_idle":
                     yield ("done", "")
                     return
-
-
-def send_user_event(session_id: str, message: str) -> None:
-    """Send a user message event to an existing session."""
-    client = _get_client()
-    client.beta.sessions.events.send(
-        session_id,
-        events=[{
-            "type": "user.message",
-            "content": [{"type": "text", "text": message}],
-        }],
-    )
-
-
-def update_agent_system_prompt(
-    config_store: ConfigStore,
-    prefs: Preferences,
-) -> None:
-    """Update the managed agent's system prompt when preferences change significantly.
-
-    Creates a new agent version with the updated preferences baked in.
-    The next new session will pick up the updated prompt automatically.
-    """
-    cfg = config_store.load()
-    if not cfg.managed_agent_id:
-        return
-    client = _get_client()
-    client.beta.agents.update(
-        cfg.managed_agent_id,
-        system=_system_prompt(cfg.agent_name, cfg.customer_name, prefs),
-    )
