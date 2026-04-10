@@ -365,13 +365,34 @@ class PreferencesStore:
         else:
             self._json_save_entry(entry)
 
+    def save_messages(self, messages: list) -> None:
+        if _backend() == "d1":
+            _D1Client().execute(
+                "INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                ["conversation_messages", json.dumps(messages)],
+            )
+        else:
+            (DATA_DIR / "messages.json").write_text(json.dumps(messages, indent=2))
+
+    def load_messages(self) -> list:
+        if _backend() == "d1":
+            rows = _D1Client().execute(
+                "SELECT value FROM config WHERE key = 'conversation_messages'"
+            )
+            return json.loads(rows[0]["value"]) if rows else []
+        path = DATA_DIR / "messages.json"
+        return json.loads(path.read_text()) if path.exists() else []
+
     def clear(self, keep_preferences: bool = False) -> None:
         if _backend() == "json":
             self._saved_path.unlink(missing_ok=True)
+            (DATA_DIR / "messages.json").unlink(missing_ok=True)
             if not keep_preferences:
                 self._prefs_path.unlink(missing_ok=True)
         else:
             d1 = _D1Client()
             d1.execute("DELETE FROM saved_properties")
+            d1.execute("DELETE FROM config WHERE key = 'conversation_messages'")
             if not keep_preferences:
                 d1.execute("DELETE FROM preferences")

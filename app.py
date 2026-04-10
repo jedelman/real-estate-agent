@@ -96,11 +96,11 @@ if "cfg" not in st.session_state:
 
 cfg: AppConfig = st.session_state.cfg
 
-# Session state defaults
+# Session state defaults — restore checkpointed messages on first load
 for key, default in [
-    ("messages", []),
+    ("messages", pref_store.load_messages() if cfg.session_id else []),
     ("session_id", cfg.session_id),
-    ("initialized", False),
+    ("initialized", bool(cfg.session_id)),  # skip greeting if resuming
     ("property_cards", []),   # accumulated across the whole conversation
     ("reactions", {}),        # prop_key → "liked"|"disliked"|"touring"
 ]:
@@ -177,6 +177,7 @@ with st.sidebar:
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🔄 New chat", use_container_width=True):
+            pref_store.save_messages([])
             st.session_state.update({
                 "messages": [],
                 "session_id": None,
@@ -316,11 +317,14 @@ def _stream_response(session_id: str, user_message: str = "", already_sent: bool
 
 
 def _post_process(response_text: str):
-    """After each response: extract preferences + extract property cards."""
+    """After each response: checkpoint messages + extract preferences + extract property cards."""
     conversation = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.messages
     ]
+
+    # Checkpoint immediately (before background work) so a refresh never loses a turn
+    pref_store.save_messages(st.session_state.messages)
 
     def _run():
         # Preference extraction (CHECKS pattern)
